@@ -1,0 +1,222 @@
+"								/*
+								 * We will perform a check here to ensure this is not a
+								 * cross certificate back to our issuer.  If it is,
+								 * we will not add it, because we only want certs in the
+								 * direction of issuedByThisCa.
+								 */
+								byte[] parentINH = certCache.getIssuerCertId().getIssuerNameHash().getOctets();
+								byte[] parentIKH  = certCache.getIssuerCertId().getIssuerKeyHash().getOctets();
+								byte[] childINH = childCertCache.getSubjectCertId().getIssuerNameHash().getOctets();
+								byte[] childIKH = childCertCache.getSubjectCertId().getIssuerKeyHash().getOctets();
+								if (!Arrays.equals(parentIKH, childIKH) && !Arrays.equals(parentINH, childINH)) {
+									certCache.addSubject(childCertCache);
+								} else {
+									String message = "Cross Certificate back to a cache entries issuer.";
+									rejectManager.putRejectedCertificate(childCertCache.getCertificate(), message, uri.toString());
+								}
+"
+
+We are using recursion, so we probably have to build a set of byte[][], where the first is issuerKeyHash and the second is issuerNameHash.
+
+As we work down the path from the trust anchor, we will add the values for each CA to the set
+
+Common -> skh[1234], snh[5678]
+  Treas Root -> skh[4321], snh[8765]
+    Common -> skh[1234], snh[5678] <- This is the one we want to avoid adding to the cache. It is a cross certificate back to the common policy.
+
+
+If we can build the flattened cache as we are building the CertificateCache entries, then we can refer to the flattened cache by doing a getIssuer(certID).
+So, when we encounter skh[1234], snh[5678], we can check the flattened cache to see if the issuer is already in there... 
+
+
+	/**
+	 * The intent on the method name is to remove confusion on "forward" or "reverse" 
+	 * discovery.  We will use the terminology for crossCertificatePair in ITU-T X.509 (2012):
+	 * 
+	 * "The term forward was used in previous editions for issuedToThisCA and the term reverse 
+	 * was used in previous editions for issuedByThisCA".  In old terms, this is "reverse" 
+	 * discovery since we are doing an SIA chase.
+	 * 
+	 * 
+	 * @param certCache
+	 * @return
+	 */
+	public static CertificateCache issuedByThisCADiscovery(CertificateCache certCache, Set<CertID> currentPath) {
+		/*
+		 * We are going to build a set of CertIDs so we
+		 * can see the issuers in the path we are building.
+		 * 
+		 * We will use this as we discover new certificates to
+		 * filter out any cross certificates that go in the
+		 * wrong direction for our needs.
+		 */
+		Set<CertID> forkedPath = new HashSet<CertID>();
+		if (currentPath != null) {
+			forkedPath.addAll(currentPath);
+		}
+		/*
+		 * Get the RejectedCertCacheManager instance so we can
+		 * manage rejected certificates as we discover.
+		 */
+		RejectedCertCacheManager rejectManager = RejectedCertCacheManager.getInstance();
+		/*
+		 * Get the HTTP SIA URIs from the certificate in the
+		 * certificate cache entry we are evaluating
+		 */
+		PkiUri[] siaUris = ValidationUtils.getHttpSiaUris(certCache.getCertificate());
+		/*
+		 * If there are HTTP SIA URIs, then process them,
+		 * otherwise, return our certificate cache entry
+		 * unmodified.
+		 */
+		HttpClient client = HttpClient.getInstance();
+		if (siaUris != null && siaUris.length>0)
+		for (PkiUri uri: siaUris) {
+			UriCacheManager uriCm = UriCacheManager.getInstance();
+			/*
+			 * Check our URI cache to see if we
+			 * have already fetched the data.  The
+			 * URI cache will have a scheduler attached
+			 * for periodic updates using a cache.refresh()
+			 */
+			if (uriCm.getUriCache().isInCache(uri)) {
+				LOG.info("URI is in URI Cache, Skipping: " + uri.toString());
+				break;
+			}
+			LOG.info("We have not seen this URI yet, Fetching: " + uri.toString());
+			byte[] cmsCertsBa = null;
+			/*
+			 * NOTE:  If we catch an exception here on the first SIA URI, we
+			 * are dead in the water for issuedByThisCA discovery.  TODO:  Add a timer and re-discover.
+			 */
+			try {
+				cmsCertsBa = client.getRequest(uri);
+			} catch (HttpClientException e) {
+				LOG.fatal("Error getting during SIA chase: " + e.getMessage(), e);
+			}
+			if (cmsCertsBa != null) {
+				CMSSignedData cms = null;
+				try {
+					cms = new CMSSignedData(cmsCertsBa);
+				} catch (CMSException e) {
+					LOG.fatal("Error parsing certs-only CMS message: " + e.getMessage(), e);
+				}
+				if (cms != null) {
+					Store certStore = cms.getCertificates();
+					@SuppressWarnings("unchecked")
+					ArrayList<X509CertificateHolder> certC = (ArrayList<X509CertificateHolder>) certStore.getMatches(null);
+					LOG.info("Discovered " + certC.size() + " certificates!");
+					LOG.debug("certs-only message: " + DataUtil.byteArrayToString(cmsCertsBa));
+					JcaX509CertificateConverter converter = new JcaX509CertificateConverter();
+					/*
+					 * We need to loop through the certificates we find,
+					 * and add them as children to the caller.
+					 */
+					for (X509CertificateHolder ch: certC) {
+						LOG.info("Processing discovered cert: " + ch.getSubject().toString());
+						X509Certificate thisCert = null;
+						try {
+							thisCert = converter.getCertificate(ch);
+						} catch (CertificateException e) {
+							LOG.fatal("Error getting X509Certificate from X509CertificateHolder: " + e.getMessage(), e);
+						}
+						CertID subjectCertId = null;
+						try {
+							subjectCertId = ValidationUtils.getCertIdentifier(certCache.getCertificate(), thisCert).toASN1Object();
+						} catch (ValidationException e) {
+							LOG.fatal("Error generating CertID for child: " + e.getMessage(), e);
+						}
+						LOG.info("Subject ID: " + DataUtil.byteArrayToString(subjectCertId.getIssuerNameHash().getOctets()) + ":" + DataUtil.byteArrayToString(subjectCertId.getIssuerKeyHash().getOctets()));
+
+						/*
+						 * Make sure the certificate we are evaluating:
+						 * -Is not null
+						 * -Is a CA certificate
+						 * -Is not the CA we are performing the discovery on
+						 * -Is signed by the CA we are performing a discovery on
+						 * -Is not expired
+						 * 
+						 * If the certificate does not meet the requirements
+						 * above, place it in the rejected certificate cache.
+						 */
+						if (thisCert != null &&
+								isCa(thisCert) &&
+								thisCert != certCache.getCertificate() &&
+								certCache.isSignerOf(thisCert) &&
+								rejectManager.isAcceptableCA(thisCert, uri.toString()) &&
+								rejectManager.isRightDirection(subjectCertId, thisCert, forkedPath, uri.toString())) {
+							/*
+							 * Create a child CertCache Object,
+							 * and add it to the parent certCache.
+							 */
+							CertificateCache childCertCache = null;
+							try {
+								childCertCache = new CertificateCache(thisCert);
+							} catch (ValidationException e) {
+								LOG.fatal("Error creating child CertificateCache: " + e.getMessage(), e);
+							}
+							CertID issuerCertId = certCache.getSubjectCertId();
+							childCertCache.setIssuerCertId(issuerCertId);
+							childCertCache.setSubjectCertId(subjectCertId);
+							forkedPath.add(subjectCertId);
+							childCertCache = issuedByThisCADiscovery(childCertCache, forkedPath);
+							certCache.addSubject(childCertCache);
+						}
+					}
+				}
+			}
+
+		} else {
+			/*
+			 * No SIA!  Return our cacheEntry unmodified!
+			 */
+			LOG.info("Certificate does not contain SIA extension.  End of path?");
+			return certCache;
+		}
+		return certCache;
+	}
+
+	//subjectCertId, thisCert, forkedPath, uri.toString()
+	public boolean isRightDirection(CertID subjectCertID, X509Certificate subject, Set<CertID> currentPath, String source) {
+		boolean rightDirection = false;
+		byte[] childINH = subjectCertID.getIssuerNameHash().getOctets();
+		byte[] childIKH = subjectCertID.getIssuerKeyHash().getOctets();
+		/*
+		 * Lets make sure the current path is established and we are 
+		 * are not rejecting certs from the trust anchor.  The current
+		 * path will not have any entries if we are just getting started.
+		 */
+		if (currentPath.isEmpty()) {
+			return true;
+		}
+		System.out.println("Path contains " + currentPath.size() + " entries.");
+		int idHit = 0;
+		for (CertID pathEntry: currentPath) {
+			/*
+			 * We will perform a check here to ensure this is not a
+			 * cross certificate back to our issuer.  If it is,
+			 * we will not add it, because we only want certs in the
+			 * direction of issuedByThisCa.
+			 */
+			byte[] parentINH = pathEntry.getIssuerNameHash().getOctets();
+			byte[] parentIKH  = pathEntry.getIssuerKeyHash().getOctets();
+			System.out.println("Child: " + DataUtil.byteArrayToString(childINH) + ":" + DataUtil.byteArrayToString(childIKH));
+			System.out.println("Parent: " + DataUtil.byteArrayToString(parentINH) + ":" + DataUtil.byteArrayToString(parentIKH));
+			if (Arrays.equals(parentIKH, childIKH) && Arrays.equals(parentINH, childINH)) {
+				idHit++;
+			}
+			if (idHit >= 2) {
+				System.out.println("Child and Parent Match!");
+				rightDirection = false;
+				String message = "Cross Certificate in the wrong direction.";
+				this.putRejectedCertificate(subject, message, source);
+				break;
+			} else {
+				System.out.println("No Match, moving on.");
+				rightDirection = true;
+			}
+		}
+		return rightDirection;
+	}
+
+\
