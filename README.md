@@ -9,7 +9,7 @@ Baseline code to build a validation cache (to provide validation services).
   * Identifying the certificate authorities from a Root downward is performed using SIA chases. 
   * Identifying the certificate authorities from an end entity upward is performed using AIA chases. 
   
-* Does this code help me identify ALL the OCSP or CRL endpoints that may be available? 
+* Does this code help me identify ALL the OCSP and CRL endpoints that may be available? 
   * No.  This code cannot identify the final End Entity certificates (TLS, Person, etc) as these aren't discoverable via SIA from the final issuing certificate authority.  Therefore, the end entity certificates may have additional OCSP(AIA) and CRL(CDP) 
 
 
@@ -18,8 +18,9 @@ I make no claims that this code is right or wrong, good or bad.  I've had it on 
 ## Outputs
 
 * Performs SIA discovery using COMMON (Federal Common Policy CA) as the root certificate
-* Uses discovered objects from SIA (down from root) and recurses to perform AIA from those discovered objects
-* Outputs all certificates discovered in PEM form, and an HTML log showing results including timing transactions for P7B(AIA), OCSP(AIA) and CRL(CDP) URIs identified in the certificates
+* Uses discovered objects from SIA (down from root) 
+  * Currently does not recurse to perform AIA from those discovered objects (TODO comment in code)
+* Outputs all certificates discovered in PEM form, and an HTML log showing results including timing transactions for P7B(AIA) and CRL(CDP) URIs identified in the certificates
 
 No warranties made on prettiness of the outputs!  Screenshot sample:
 
