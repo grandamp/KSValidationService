@@ -29,6 +29,7 @@ No warranties made on prettiness of the outputs!  Screenshot sample:
 
 * Deploy as war in J2EE application server (i.e. Apache Tomcat)
 * Tested on Tomcat 7
-* Please note: the CRL files WILL be fetched. Some of these files are greater than 30 MB.  Rapid testing or iterative refreshes may impact I/O costs. 
+* Please note: the CRL files WILL be fetched. Some of these files are greater than 30 MB.  Rapid redeployments may impact I/O costs.
+* Refreshing the URL that displays the validation cache has no effect. To reset the cache (at the moment) you need to _restart_ the app
 
 
